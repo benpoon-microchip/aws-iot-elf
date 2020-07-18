@@ -14,6 +14,7 @@
 # permissions and limitations under the License.
 
 import os
+import subprocess
 import json
 import time
 import uuid
@@ -43,7 +44,10 @@ ch.setFormatter(formatter)
 log.addHandler(ch)
 
 AWS_IOT_MQTT_PORT = 8883
-DEFAULT_TOPIC = "elf"
+#DEFAULT_TOPIC = "elf"
+DEFAULT_TOPIC = "$aws/things/+/shadow/update"
+AUDIO_DATA_TOPIC = "things/+/audiodata"
+
 elf_cfg_dir = "misc"
 full_certs = "things.json"
 cfg_dir = os.getcwd() + '/' + elf_cfg_dir + '/'
@@ -57,6 +61,10 @@ thing_name_template = "thing_{0}"
 
 
 make_string = lambda x: "".join(choice(lowercase) for i in range(x))
+
+start_ices2 = 0
+pkt_cnt = 0
+buf_list = ["","","","","","","","","","",""]
 
 
 def certs_exist():
@@ -204,9 +212,11 @@ class ElfThread(threading.Thread):
         self.thing = thing
         self.root_cert = cli.root_cert
         if cli.append_thing_name:
-            self.topic = '{0}/{1}'.format(cli.topic, self.thing_name)
+            self.shadow_topic = '{0}/{1}'.format(cli.shadow_topic, self.thing_name)
+            self.audio_topic = '{0}/{1}'.format(cli.audio_topic, self.thing_name)
         else:
-            self.topic = cli.topic
+            self.shadow_topic = cli.shadow_topic
+            self.audio_topic = cli.audio_topic
 
         self.region = cli.region
         self.cfg = cfg
@@ -216,7 +226,7 @@ class ElfThread(threading.Thread):
 
         if policy_name_key not in thing.keys():
             policy_name, policy_arn = _create_and_attach_policy(
-                self.region, self.topic,
+                self.region, self.shadow_topic,
                 self.thing_name, self.thing['certificateArn'],
                 cli
             )
@@ -299,17 +309,123 @@ class ElfListener(ElfThread):
     """
 
     def listener_callback(self, client, userdata, message):
+        global start_ices2
         log.info("Received message: {0} from topic: {1}".format(
             message.payload, message.topic))
+        if (message.payload.find("webapp") >= 0):
+            return
+        #log.info("Received message from topic: {0}".format(
+        #    message.topic))
+        
+        if (message.payload.find("\"SW\": false") >= 0):
+            log.info("Debug: False")
+            if os.path.exists('rio2_audio.ogg'):
+                os.remove('rio2_audio.ogg')
+                log.info("Remove file")
+            proc = subprocess.Popen(['kill -9 `pidof ices`'], shell=True)
+        
+        #if (message.topic.split("/")[2].find("xxx") == -1):
+        #    log.info("exit")
+        #    return
+        """ 
+        loaded_json = json.loads(message.payload)
+        for x in loaded_json:
+            if (x == "state"):
+                for y in loaded_json[x]:
+                    if (y == "reported"):
+                        for z in loaded_json[x][y]:
+                            if (z == "audio"):
+                                if loaded_json[x][y][z]:
+                                    start_ices2 = 1 
+                            elif (z == "SW"):
+                                if loaded_json[x][y][z]:
+                                    log.info("Debug: True")
+                                else:
+                                    log.info("Debug: False")
+                                    if os.path.exists('rio2_audio.ogg'):
+                                        os.remove('rio2_audio.ogg')
+                                        log.info("Remove file")
+                                    proc = subprocess.Popen(['kill -9 `pidof ices`'], shell=True)
+                                
+        """
+        #f1 = open('rio2_audio.ogg', 'w+b')
+        #f1 = open('/home/ben/test/ices-2.0.2/src/rio2_audio.ogg', 'a+b')
+        #f1.write(message.payload)
+        #f1.close()
+
+    def audio_listener_callback(self, client, userdata, message):
+        global start_ices2
+        global pkt_cnt
+        global buf_list
+
+        log.info("Received message from topic: {0}".format(
+            message.topic))
+        #res = ":".join("{:02x}".format(ord(c)) for c in message.payload[0:4])
+        #log.info(res)
+
+        if (ord(message.payload[0]) == 0) :
+            pkt_cnt = 0;
+            buf_list = ["","","","","","","","","","",""]
+
+        if (ord(message.payload[0]) == pkt_cnt): 
+            f1 = open('rio2_audio.ogg', 'a+b')
+            f1.write(message.payload[2:])
+            f1.close()
+            pkt_cnt += 1
+        else :
+            buf_list.sort(reverse=True)
+
+            for x in range (len(buf_list)):
+                if len(buf_list[x]) == 0 :
+                    buf_list[x] = message.payload
+                    #log.info("buffer packet {0}".format(x))
+                    break
+
+            if (x == len(buf_list) - 1) :
+                #log.info("drop 1 packet")
+                pkt_cnt += 1
+
+            
+
+            buf_list.sort()
+            
+            for x in range (len(buf_list)):
+                if len(buf_list[x]) > 2 :
+                    if (ord(buf_list[x][0]) == pkt_cnt) :
+                        log.info("buffer packet cnt {0}".format(pkt_cnt))
+                        f1 = open('rio2_audio.ogg', 'a+b')
+                        f1.write(buf_list[x][2:])
+                        f1.close()
+                        pkt_cnt += 1
+                        buf_list[x] = ""
+
+
+
+        if (os.path.isfile('rio2_audio.ogg')):
+            #if (start_ices2 == 1) and (os.path.getsize('rio2_audio.ogg') > 15000):
+            if (os.path.getsize('rio2_audio.ogg') > 10000):
+                log.info("starting ices2...")
+                start_ices2 = 0
+
+                p = os.popen('ps -aux | grep -v grep | grep ices-playlist')     # check if the ices is running 
+                if (p.read() == ""):
+                    proc = subprocess.Popen(['../ices2/ices/src/ices /etc/ices/ices-playlist.xml'], shell=True)
+                    pid = proc.pid
+                    log.info("pid is: {0}".format(pid))
 
     def run(self):
-        self.mqttc.subscribe(self.topic, 1, self.listener_callback)
+        self.mqttc.subscribe(self.shadow_topic, 1, self.listener_callback)
         log.info("ELF {0} subscribed on topic: {1}".format(
-            self.thing_name, self.topic))
+            self.thing_name, self.shadow_topic))
+
+        self.mqttc.subscribe(self.audio_topic, 1, self.audio_listener_callback)
+        log.info("ELF {0} subscribed on topic: {1}".format(
+            self.thing_name, self.audio_topic))
 
         start = datetime.datetime.now()
         finish = start + datetime.timedelta(seconds=self.duration)
-        while finish > datetime.datetime.now():
+        #while finish > datetime.datetime.now():
+        while 1:
             time.sleep(1)  # wait a second between iterations
 
 
@@ -458,11 +574,12 @@ def subscribe(cli):
     _init(cli)
     iot = _get_iot_session(cli.region, cli.profile_name)
 
-    topic = cli.topic
+    shadow_topic = cli.shadow_topic
+    audio_topic = cli.audio_topic
     duration = cli.duration
     log.info(
-        "ELF subscribing on topic root:'{0}' for:{1} secs".format(
-            topic, duration))
+        "ELF subscribing on topic root:'{0}' and '{1}'".format(
+            shadow_topic, audio_topic))
 
     cfg = _get_elf_config()
     things = _get_things_config()
@@ -647,7 +764,9 @@ if __name__ == '__main__':
         '--root-cert', dest='root_cert',
         default="aws-iot-rootCA.crt",
         help="The root certificate for the credentials")
-    subs.add_argument('--topic', dest='topic', default=DEFAULT_TOPIC,
+    subs.add_argument('--shadow_topic', dest='shadow_topic', default=DEFAULT_TOPIC,
+                      help='The topic on which to subscribe.')
+    subs.add_argument('--audio_topic', dest='audio_topic', default=AUDIO_DATA_TOPIC,
                       help='The topic on which to subscribe.')
     subs.add_argument('--append-thing-name', dest='append_thing_name',
                       default=False, action='store_true',
